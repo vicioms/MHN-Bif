@@ -4,7 +4,7 @@ import torch.nn.functional as F
 from tqdm import tqdm
 
 @torch.no_grad()
-def run_dynamics(beta0, betas, patterns, dt, num_steps, num_runs=1, verbose=False):
+def dynamics_gaussian_init(beta0, betas, patterns, dt, num_steps, num_runs=1, verbose=False):
     device = patterns.device
     dtype = patterns.dtype
 
@@ -36,16 +36,34 @@ def run_dynamics(beta0, betas, patterns, dt, num_steps, num_runs=1, verbose=Fals
 
     return x, weights
 
-
 @torch.no_grad()
-def weights_fixed_points(betas, gram_matrix, num_steps, num_runs=1,verbose=False):
+def wfp_gram_uniform_init(betas, gram_matrix, num_steps, verbose=False):
     device = gram_matrix.device
     dtype = gram_matrix.dtype
 
     B = betas.numel()
     K = gram_matrix.shape[0]
-    w = torch.rand((num_runs, B, K), device=device, dtype=dtype)
+    w = torch.ones((B, K), device=device, dtype=dtype)
     w = w / w.sum(dim=-1, keepdim=True)
+    beta_view = betas[:, None] 
+    for _ in tqdm(range(num_steps), disable=not verbose):
+        logits = torch.matmul(w, gram_matrix)
+        logits.mul_(beta_view)
+        w = torch.softmax(logits, dim=-1)
+    return w
+
+
+@torch.no_grad()
+def wfp_gram_dirichlet_init(betas, gram_matrix, num_steps,dirichlet_concentration_param = 1, num_runs=1,verbose=False):
+    device = gram_matrix.device
+    dtype = gram_matrix.dtype
+    B = betas.numel()
+    K = gram_matrix.shape[0]
+
+    if device.type == 'mps':
+        w = torch.distributions.Dirichlet(dirichlet_concentration_param * torch.ones(K, device='cpu', dtype=dtype)).sample((num_runs, B)).to(device=device)
+    else:
+        w = torch.distributions.Dirichlet(dirichlet_concentration_param * torch.ones(K, device=device, dtype=dtype)).sample((num_runs, B))    
     beta_view = betas[None, :, None] 
     for _ in tqdm(range(num_steps), disable=not verbose):
         logits = torch.matmul(w, gram_matrix)
@@ -54,3 +72,5 @@ def weights_fixed_points(betas, gram_matrix, num_steps, num_runs=1,verbose=False
     if num_runs == 1:
         w = w.squeeze(0)
     return w
+
+

@@ -67,3 +67,9 @@ dmypy.json
 
 # Ruff / linting
 .ruff_cache/
+
+
+
+# Personalized
+datasets/stl10/
+results/*.npz
