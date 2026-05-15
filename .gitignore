@@ -72,4 +72,6 @@ dmypy.json
 
 # Personalized
 datasets/stl10/
+datasets/cellpose/
+datasets/cifar100/
 results/*.npz
