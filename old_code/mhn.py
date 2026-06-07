@@ -11,7 +11,7 @@ class MHN(nn.Module):
         self.input_dim = input_dim
         self.num_patterns = num_patterns
         self.patterns = nn.Parameter(
-            torch.randn(num_patterns, input_dim),
+            torch.randn(num_patterns, input_dim)/torch.sqrt(torch.tensor(input_dim, dtype=torch.float32)),
             requires_grad=True
         )
         self.biases = nn.Parameter(
@@ -66,25 +66,57 @@ class MHN(nn.Module):
         log_Z_data = torch.logsumexp(logits_data, dim=2) # (num_betas, N)
         return log_Z_model, log_Z_data
 
+
+@torch.no_grad()
+def get_stability_matrix_gram(gram_matrix, w0):
+    K = w0.numel()
+    u = torch.sqrt(w0)
+    proj = torch.eye(K, device=w0.device, dtype=w0.dtype) - torch.outer(u, u)
+    W_half = torch.diag(torch.sqrt(w0))
+    simplex_proj = proj @ W_half
+    stability_matrix = simplex_proj @ gram_matrix @ simplex_proj.T
+    return stability_matrix, simplex_proj
+
+
 @torch.no_grad()
 def get_critical_beta(patterns, biases):
-    w0 = torch.softmax(biases, dim=0)  # (K,)
-    u = torch.sqrt(w0)
+    w = torch.softmax(biases, dim=0)  # (K,)
+    u = torch.sqrt(w)
 
     K = patterns.shape[0]
     I = torch.eye(K, device=patterns.device, dtype=patterns.dtype)
 
     proj = I - torch.outer(u, u)
+    W_half = torch.diag(torch.sqrt(w))
 
-    W_half = torch.diag(torch.sqrt(w0))
-    half_stab_matrix = proj @ W_half @ self.patterns
+    C_half = proj @ W_half
 
-    stability_matrix = half_stab_matrix @ half_stab_matrix.T
+    G = patterns @ patterns.T
+    stability_matrix = C_half @ G @ C_half.T
 
     vals = torch.linalg.eigvalsh(stability_matrix)
-    beta = 1.0 / vals.max()
+    beta_c = 1.0 / vals.max()
 
-    return beta
+    return beta_c
+
+@torch.no_grad()
+def get_critical_beta_gram_uniform_fixed_point(gram_matrix):
+    K = gram_matrix.shape[0]
+    device = gram_matrix.device
+    dtype = gram_matrix.dtype
+
+    if gram_matrix.shape != (K, K):
+        raise ValueError(f"gram_matrix must be square, got {tuple(gram_matrix.shape)}.")
+
+    one = torch.ones(K, device=device, dtype=dtype)
+    P = torch.eye(K, device=device, dtype=dtype) - torch.outer(one, one) / K
+
+    gram_proj = P @ gram_matrix @ P
+
+    lambda_max = torch.linalg.eigvalsh(gram_proj).max()
+
+    beta_c = K / lambda_max
+    return beta_c
 
 @torch.no_grad()
 def get_entropies(w):
@@ -164,9 +196,6 @@ def annealing_uniform_init(
 
     return x_fp.permute(1, 0, 2)
 
-    
-
-    
 @torch.no_grad()
 def dynamics_gaussian_init(beta0, betas, patterns, dt, num_steps, num_runs=1, verbose=False):
     device = patterns.device
@@ -199,7 +228,6 @@ def dynamics_gaussian_init(beta0, betas, patterns, dt, num_steps, num_runs=1, ve
     weights = torch.softmax(logits, dim=-1)
 
     return x, weights
-
 
 @torch.no_grad()
 def dynamics_gaussian_init_with_biases(beta0, betas, patterns, biases, dt, num_steps, num_runs=1, verbose=False):
