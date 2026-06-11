@@ -81,3 +81,5 @@ old_code/plots/
 old_code/animations/
 old_code/eqm/
 local_data/
+diffusion/runs/
+results/
