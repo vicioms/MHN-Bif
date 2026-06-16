@@ -71,15 +71,6 @@ dmypy.json
 
 
 # Personalized
-datasets/stl10/
-datasets/cellpose/
-datasets/cifar100/
-datasets/mnist/
-datasets/pokemondb_sprites/
-old_code/results/
-old_code/plots/
-old_code/animations/
-old_code/eqm/
+datasets/*
+old_code/
 local_data/
-diffusion/runs/
-results/
