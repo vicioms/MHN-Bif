@@ -85,3 +85,202 @@ class MixtureLayer(nn.Module):
             return x + out_force
         else:
             return out_force
+
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+
+class MemoryLayer(nn.Module):
+    def __init__(
+        self,
+        input_dim: int,
+        num_memories: int,
+        beta: float,
+        is_causal: bool = True,
+        modulation: float = 0.1,
+        decay: float = 0.95,
+        normalize: bool = True,
+    ):
+        super().__init__()
+
+        self.input_dim = input_dim
+        self.num_memories = num_memories
+        self.beta = beta
+        self.is_causal = is_causal
+        self.decay = decay
+        self.normalize = normalize
+
+        # memory keys: m_k
+        self.memory_keys = nn.Linear(input_dim, num_memories, bias=False)
+
+        # prompt-token -> memory bias contribution
+        self.context_proj = nn.Linear(input_dim, num_memories, bias=False)
+
+        # memory values: v_k
+        self.memory_values = nn.Parameter(
+            torch.randn(num_memories, input_dim) / input_dim**0.5
+        )
+
+        self.log_modulation = nn.Parameter(torch.tensor(float(modulation)).log())
+
+    def causal_bias(self, x):
+        """
+        x: (B, T, input_dim)
+
+        returns:
+            bias: (B, T, num_memories)
+
+        b_t = decay * b_{t-1} + P x_t
+        """
+
+        raw = self.context_proj(x)  # (B, T, K)
+
+        if not self.is_causal:
+            # Non-causal global prompt field shared by all positions.
+            global_bias = raw.sum(dim=1, keepdim=True)  # (B, 1, K)
+            return global_bias.expand_as(raw)
+
+        B, T, K = raw.shape
+        b = torch.zeros(B, K, device=x.device, dtype=x.dtype)
+        out = []
+
+        for t in range(T):
+            b = self.decay * b + raw[:, t]
+            out.append(b)
+
+        return torch.stack(out, dim=1)  # (B, T, K)
+
+    def forward(self, x):
+        """
+        x: (B, T, input_dim)
+
+        returns:
+            out:     (B, T, input_dim)
+            weights: (B, T, num_memories)
+            bias:    (B, T, num_memories)
+        """
+
+        if x.ndim != 3:
+            raise ValueError(f"x must be (B, T, input_dim), got {x.shape}")
+
+        # similarity of current token/state to learned memory keys
+        if self.normalize:
+            x_hat = F.normalize(x, dim=-1)
+            key_hat = F.normalize(self.memory_keys.weight, dim=-1)  # (K, input_dim)
+            memory_scores = torch.einsum("btd,kd->btk", x_hat, key_hat)
+        else:
+            memory_scores = self.memory_keys(x)  # (B, T, K)
+
+        # recurrent prompt-induced bias over memories
+        bias = self.causal_bias(x)  # (B, T, K)
+
+        logits = self.beta * memory_scores + bias
+
+        weights = torch.softmax(logits, dim=-1)  # (B, T, K)
+
+        retrieved = torch.einsum("btk,kd->btd", weights, self.memory_values)
+
+        eps = self.log_modulation.exp()
+
+        out = x + eps * (retrieved - x)
+
+        return out, weights, bias
+
+        
+
+class CausalHopfieldLayer(nn.Module):
+    def __init__(
+        self,
+        x_dim,
+        seq_length,
+        h_dim,
+        att_dim,
+        beta,
+        tau_h=1.0,
+        tau_m=1.0,
+        bias=False,
+    ):
+        super().__init__()
+
+        self.x_dim = x_dim
+        self.seq_length = seq_length
+        self.h_dim = h_dim
+        self.att_dim = att_dim
+
+        self.beta = beta
+        self.tau_h = tau_h
+        self.tau_m = tau_m
+
+        self.lin_q = nn.Linear(h_dim, att_dim, bias=bias)
+        self.lin_k = nn.Linear(x_dim, att_dim, bias=bias)
+        self.lin_v = nn.Linear(x_dim, h_dim, bias=bias)
+        self.lin_out = nn.Linear(h_dim, x_dim, bias=bias)
+
+        self.x_grid = None
+        self.t_grid = None
+        self.valid_mask = None
+
+    def set_context(self, x_grid, t_grid, valid_mask=None):
+        device = next(self.parameters()).device
+        dtype = next(self.parameters()).dtype
+
+        self.x_grid = x_grid.to(device=device, dtype=dtype)
+        self.t_grid = t_grid.to(device=device, dtype=dtype)
+
+        if valid_mask is None:
+            self.valid_mask = None
+        else:
+            self.valid_mask = valid_mask.to(device=device, dtype=torch.bool)
+
+    def forward(self, t, h):
+        """
+        t: scalar tensor
+        h: (B, h_dim)
+
+        returns:
+            dh: (B, h_dim)
+        """
+
+        if self.x_grid is None or self.t_grid is None:
+            raise RuntimeError("Call set_context(x_grid, t_grid, valid_mask) before forward.")
+
+        x = self.x_grid       # (B, T, x_dim)
+        ts = self.t_grid      # (T,)
+
+        B, T, _ = x.shape
+
+        time_mask = ts <= t   # (T,)
+
+        if self.valid_mask is not None:
+            mask = time_mask[None, :] & self.valid_mask   # (B, T)
+        else:
+            mask = time_mask[None, :].expand(B, T)        # (B, T)
+
+        q = self.lin_q(h)     # (B, att_dim)
+        k = self.lin_k(x)     # (B, T, att_dim)
+        v = self.lin_v(x)     # (B, T, h_dim)
+
+        scores = self.beta * torch.einsum("bd,btd->bt", q, k)
+
+        # Recency bias. Equivalent to -(t - s) / tau_m up to a softmax constant.
+        scores = scores + ts[None, :] / self.tau_m
+
+        scores = scores.masked_fill(~mask, -torch.inf)
+
+        alpha = torch.softmax(scores, dim=1)          # (B, T)
+
+        y = torch.einsum("bt,bth->bh", alpha, v)      # (B, h_dim)
+
+        dh = -h / self.tau_h + y
+
+        return dh
+
+    def readout(self, h):
+        return self.lin_out(h)

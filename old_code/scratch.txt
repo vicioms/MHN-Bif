@@ -1,0 +1,133 @@
+from scipy.spatial.distance import squareform
+from scipy.cluster.hierarchy import linkage, cophenet
+from sklearn.cluster import AgglomerativeClustering, KMeans
+from sklearn.metrics import silhouette_score
+
+def scores_agg_cluster(dists, min_num_clusters, max_num_clusters):
+    #best_score = -1.0
+    #best_num_clusters = None
+    #best_labels = None
+    all_scores = []
+    all_num_clusters = range(min_num_clusters, min(max_num_clusters, dists.shape[0]-1)+1)
+    for num_clusters in all_num_clusters:
+        model = AgglomerativeClustering(
+            n_clusters=num_clusters,
+            metric="precomputed",
+            linkage="complete",
+        )
+        labels = model.fit_predict(dists)
+        score = silhouette_score(dists, labels, metric="precomputed")
+        all_scores.append(score)
+        #if score > best_score:
+        #    best_score = score
+        #    best_num_clusters = num_clusters
+        #    best_labels = labels
+    #all_clusters = []
+    #for label in range(best_num_clusters):
+    #    mask = best_labels == label
+    #    all_clusters.append(data[mask].mean(dim=0))
+    #return torch.stack(all_clusters, dim=0) if type(data) == torch.Tensor else np.stack(all_clusters, axis=0), best_labels, best_num_clusters, best_score
+    return np.array(all_num_clusters),  np.array(all_scores)
+def hierarchical_clustering_cov(covariance, method="average", eps=1e-12):
+    covariance = np.asarray(covariance, dtype=np.float64)
+
+    if covariance.ndim != 2 or covariance.shape[0] != covariance.shape[1]:
+        raise ValueError("Covariance matrix must be square.")
+
+    variances = np.diag(covariance)
+
+    if np.any(variances <= eps):
+        raise ValueError("Covariance contains zero or negative variances.")
+
+    stds = np.sqrt(variances)
+
+    corr = covariance / np.outer(stds, stds)
+    corr = np.clip(corr, -1.0, 1.0)
+    np.fill_diagonal(corr, 1.0)
+
+    distance = 1.0 - corr
+    distance = 0.5 * (distance + distance.T)
+    np.fill_diagonal(distance, 0.0)
+
+    dist_condensed = squareform(distance, checks=True)
+    Z = linkage(dist_condensed, method=method)
+
+    cophenetic_distances = cophenet(Z)
+
+    corr_filtered = 1.0 - squareform(cophenetic_distances)
+    np.fill_diagonal(corr_filtered, 1.0)
+
+    cov_filtered = corr_filtered * np.outer(stds, stds)
+
+    return 0.5 * (cov_filtered + cov_filtered.T)
+
+
+def bahc(data, num_bootstraps, random_state=None):
+    """
+    data shape: (n_variables, n_observations)
+    """
+    data = np.asarray(data, dtype=np.float64)
+
+    if data.ndim != 2:
+        raise ValueError("data must have shape (n_variables, n_observations).")
+
+    n_variables, n_observations = data.shape
+    rng = np.random.default_rng(random_state)
+
+    out_cov = np.zeros((n_variables, n_variables), dtype=np.float64)
+    accepted = 0
+
+    while accepted < num_bootstraps:
+        indices = rng.integers(
+            0,
+            n_observations,
+            size=n_observations,
+        )
+
+        bootstrap_data = data[:, indices]
+        bootstrap_cov = np.cov(
+            bootstrap_data,
+            rowvar=True,
+            ddof=1,
+        )
+
+        # A bootstrap sample can occasionally give zero variance.
+        if (
+            not np.all(np.isfinite(bootstrap_cov))
+            or np.any(np.diag(bootstrap_cov) <= 1e-12)
+        ):
+            continue
+
+        out_cov += hierarchical_clustering_cov(
+            bootstrap_cov,
+            method="average",
+        )
+        accepted += 1
+
+    return out_cov / num_bootstraps
+
+
+def bahc_gram_from_cov(data, num_bootstraps, random_state=None):
+    data = np.asarray(data, dtype=np.float64)
+    n_objects, n_features = data.shape
+
+    rng = np.random.default_rng(random_state)
+    out = np.zeros((n_objects, n_objects))
+
+    for _ in range(num_bootstraps):
+        idx = rng.integers(0, n_features, size=n_features)
+        Xb = data[:, idx]
+
+        row_means = Xb.mean(axis=1)
+
+        cov_b = np.cov(Xb, rowvar=True, ddof=1)
+        cov_filtered = hierarchical_clustering_cov(cov_b)
+
+        gram_filtered = (
+            (n_features - 1) * cov_filtered
+            + n_features * np.outer(row_means, row_means)
+        )
+
+        out += gram_filtered
+
+    return out / num_bootstraps

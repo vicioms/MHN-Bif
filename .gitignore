@@ -72,5 +72,5 @@ dmypy.json
 
 # Personalized
 datasets/*
-old_code/
-local_data/
+paper_results/local_data/
+paper_results/experiments/
