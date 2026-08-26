@@ -74,3 +74,6 @@ dmypy.json
 datasets/*
 paper_results/local_data/
 paper_results/experiments/
+paper_results/plots/ema/
+paper_results/plots/mnist/
+paper_results/plots/cifar100/
