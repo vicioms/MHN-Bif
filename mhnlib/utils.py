@@ -7,20 +7,82 @@ from math import log, sqrt
 from typing import Optional, Tuple, Union
 from scipy.spatial import KDTree
 from scipy.sparse.csgraph import connected_components
+from scipy.sparse import coo_matrix, csr_matrix
+from scipy.cluster.hierarchy import linkage, fcluster
+from scipy.spatial.distance import squareform, pdist
+from sklearn.decomposition import PCA
 
-def jensen_distance(p,q):
-    mask_p = p > 0
-    mask_q = q > 0
-    inf_p = torch.zeros_like(p)
-    inf_p[mask_p] = -p[mask_p].log() 
-    inf_q = torch.zeros_like(q)
-    inf_q[mask_q] = -q[mask_q].log()
-    divergence = 0.5*torch.einsum("...mk,...nk->...mn", inf_p, q) + torch.einsum("...nk,...mk->...mn", inf_q, p)
-    return divergence.sqrt()
-    
-def group_by_distance(data, eps: float):
+def shift_and_rms(x : torch.Tensor, eps=1e-12):
+    shift = x.mean(dim=0, keepdim=False)
+    x_shifted = x - shift[None, :]
+
+    rms = x_shifted.norm(dim=1).square().mean().sqrt()
+    rms = rms.clamp_min(eps)
+
+    x_norm = x_shifted / rms
+
+    return shift, rms, x_norm
+
+
+def jensen_shannon_torch(p, q, eps=1e-12):
+    p = p / p.sum(dim=-1, keepdim=True).clamp_min(eps)
+    q = q / q.sum(dim=-1, keepdim=True).clamp_min(eps)
+
+    p = p.unsqueeze(-2)
+    q = q.unsqueeze(-3)
+
+    m = 0.5 * (p + q)
+
+    kl_pm = torch.where(
+        p > 0,
+        p * (p.clamp_min(eps).log() - m.clamp_min(eps).log()),
+        0.0,
+    ).sum(dim=-1)
+
+    kl_qm = torch.where(
+        q > 0,
+        q * (q.clamp_min(eps).log() - m.clamp_min(eps).log()),
+        0.0,
+    ).sum(dim=-1)
+
+    jsd = 0.5 * (kl_pm + kl_qm)
+
+    return jsd.clamp_min(0).sqrt()
+def jensen_shannon_numpy(p, q, eps=1e-12):
+    p = p / np.maximum(p.sum(axis=-1, keepdims=True), eps)
+    q = q / np.maximum(q.sum(axis=-1, keepdims=True), eps)
+
+    p = np.expand_dims(p, axis=-2)
+    q = np.expand_dims(q, axis=-3)
+
+    m = 0.5 * (p + q)
+
+    kl_pm = np.where(
+        p > 0,
+        p * (np.log(np.maximum(p, eps)) - np.log(np.maximum(m, eps))),
+        0.0,
+    ).sum(axis=-1)
+
+    kl_qm = np.where(
+        q > 0,
+        q * (np.log(np.maximum(q, eps)) - np.log(np.maximum(m, eps))),
+        0.0,
+    ).sum(axis=-1)
+
+    jsd = 0.5 * (kl_pm + kl_qm)
+
+    return np.sqrt(np.maximum(jsd, 0.0))
+
+def group_by_jensen(data, threshold: float, complete_linkage: bool = False):
     """
-    Connected components under ||x_i - x_j|| <= eps.
+    Group points by Jensen-Shannon distance.
+
+    complete_linkage=False:
+        Connected components under JSD(x_i, x_j) <= threshold.
+
+    complete_linkage=True:
+        Complete linkage: every pair within a cluster satisfies
+        JSD(x_i, x_j) <= threshold.
     """
 
     if isinstance(data, torch.Tensor):
@@ -34,28 +96,45 @@ def group_by_distance(data, eps: float):
 
     n, d = x.shape
 
-    # Build KD tree
-    tree = KDTree(x)
+    jsd_matrix = jensen_shannon_numpy(x, x)
 
-    # Sparse adjacency matrix:
-    # only pairs whose distance <= eps are stored.
-    graph = tree.sparse_distance_matrix(
-        tree,
-        max_distance=eps,
-        output_type="coo_matrix",
-    )
+    if complete_linkage:
+        if n == 1:
+            labels = np.zeros(1, dtype=int)
+            n_groups = 1
+        else:
+            jsd_matrix = 0.5 * (jsd_matrix + jsd_matrix.T)
+            np.fill_diagonal(jsd_matrix, 0.0)
 
-    # Connected components implemented in compiled scipy code
-    n_groups, labels = connected_components(
-        graph,
-        directed=False,
-        return_labels=True,
-    )
+            Z = linkage(
+                squareform(jsd_matrix, checks=False),
+                method="complete",
+            )
+
+            labels = fcluster(
+                Z,
+                t=threshold,
+                criterion="distance",
+            ) - 1
+
+            n_groups = labels.max() + 1
+
+    else:
+        indices = np.where(jsd_matrix <= threshold)
+
+        graph = coo_matrix(
+            (np.ones_like(indices[0]), indices),
+            shape=(n, n),
+        ).tocsr()
+
+        n_groups, labels = connected_components(
+            graph,
+            directed=False,
+            return_labels=True,
+        )
 
     counts = np.bincount(labels, minlength=n_groups)
 
-    # Compute centroids.
-    # bincount is generally faster than np.add.at
     x_unique = np.empty((n_groups, d), dtype=x.dtype)
 
     for k in range(d):
@@ -75,6 +154,176 @@ def group_by_distance(data, eps: float):
         labels = torch.as_tensor(labels, device=device)
 
     return x_unique, counts, labels
+def group_by_similarity(
+    data,
+    dot_scale: float,
+    complete_linkage: bool = False,
+):
+    """
+    Group points by cosine similarity.
+
+    complete_linkage=False:
+        Connected components under cosine(x_i, x_j) >= dot_scale.
+
+    complete_linkage=True:
+        Complete linkage: every pair within a cluster satisfies
+        cosine(x_i, x_j) >= dot_scale.
+    """
+
+    if isinstance(data, torch.Tensor):
+        convert_to_torch = True
+        device = data.device
+        dtype = data.dtype
+        x = data.detach().cpu().numpy()
+    else:
+        convert_to_torch = False
+        x = np.asarray(data)
+
+    n, d = x.shape
+
+    dot_product = np.dot(x, x.T)
+    dot_product /= np.linalg.norm(x, axis=1)[:, None]
+    dot_product /= np.linalg.norm(x, axis=1)[None, :]
+
+    dot_product = np.clip(dot_product, -1.0, 1.0)
+
+    if complete_linkage:
+        if n == 1:
+            labels = np.zeros(1, dtype=int)
+            n_groups = 1
+        else:
+            distance_matrix = 1.0 - dot_product
+            np.fill_diagonal(distance_matrix, 0.0)
+
+            Z = linkage(
+                squareform(distance_matrix, checks=False),
+                method="complete",
+            )
+
+            labels = fcluster(
+                Z,
+                t=1.0 - dot_scale,
+                criterion="distance",
+            ) - 1
+
+            n_groups = labels.max() + 1
+
+    else:
+        indices = np.where(dot_product >= dot_scale)
+
+        graph = coo_matrix(
+            (np.ones_like(indices[0]), indices),
+            shape=(n, n),
+        ).tocsr()
+
+        n_groups, labels = connected_components(
+            graph,
+            directed=False,
+            return_labels=True,
+        )
+
+    counts = np.bincount(labels, minlength=n_groups)
+
+    x_unique = np.empty((n_groups, d), dtype=x.dtype)
+
+    for k in range(d):
+        x_unique[:, k] = np.bincount(
+            labels,
+            weights=x[:, k],
+            minlength=n_groups,
+        )
+
+    x_unique /= counts[:, None]
+
+    if convert_to_torch:
+        x_unique = torch.as_tensor(
+            x_unique, device=device, dtype=dtype
+        )
+        counts = torch.as_tensor(counts, device=device)
+        labels = torch.as_tensor(labels, device=device)
+
+    return x_unique, counts, labels
+def group_by_distance(
+    data,
+    eps: float,
+    complete_linkage: bool):
+    """
+    Group points under ||x_i - x_j|| <= eps.
+
+    complete_linkage=False:
+        Connected components.
+
+    complete_linkage=True:
+        Complete linkage: every pair within a cluster satisfies
+        ||x_i - x_j|| <= eps.
+    """
+
+    if isinstance(data, torch.Tensor):
+        convert_to_torch = True
+        device = data.device
+        dtype = data.dtype
+        x = data.detach().cpu().numpy()
+    else:
+        convert_to_torch = False
+        x = np.asarray(data)
+
+    n, d = x.shape
+
+    if complete_linkage:
+        if n == 1:
+            labels = np.zeros(1, dtype=int)
+            n_groups = 1
+        else:
+            Z = linkage(
+                pdist(x, metric="euclidean"),
+                method="complete",
+            )
+
+            labels = fcluster(
+                Z,
+                t=eps,
+                criterion="distance",
+            ) - 1
+
+            n_groups = labels.max() + 1
+
+    else:
+        tree = KDTree(x)
+
+        graph = tree.sparse_distance_matrix(
+            tree,
+            max_distance=eps,
+            output_type="coo_matrix",
+        )
+
+        n_groups, labels = connected_components(
+            graph,
+            directed=False,
+            return_labels=True,
+        )
+
+    counts = np.bincount(labels, minlength=n_groups)
+
+    x_unique = np.empty((n_groups, d), dtype=x.dtype)
+
+    for k in range(d):
+        x_unique[:, k] = np.bincount(
+            labels,
+            weights=x[:, k],
+            minlength=n_groups,
+        )
+
+    x_unique /= counts[:, None]
+
+    if convert_to_torch:
+        x_unique = torch.as_tensor(
+            x_unique, device=device, dtype=dtype
+        )
+        counts = torch.as_tensor(counts, device=device)
+        labels = torch.as_tensor(labels, device=device)
+
+    return x_unique, counts, labels
+
 
 def get_gram_matrix(patterns):
     if patterns.ndim < 2:
@@ -201,7 +450,6 @@ def prepare_initial_conditions(
 
     return patterns, biases, betas, x0
 
-
 def prepare_initial_conditions_dual(
     grams: torch.Tensor,
     biases: torch.Tensor,
@@ -293,7 +541,6 @@ def prepare_initial_conditions_dual(
     w0 = w0.expand(P, N_ic, K)
 
     return grams, biases, betas, w0
-    
     
 def deterministic_dynamics(
     patterns: torch.Tensor,
@@ -410,19 +657,30 @@ def dual_deterministic_dynamics(
         disable=not verbose,
     )
 
+    grams_T = grams.transpose(-1, -2).contiguous()
+
     for _ in iterator:
         # Explicitly compute (G w)_k = sum_h G_{k h} w_h.
-        gram_field = torch.einsum(
-            "pkh,bpjh->bpjk",
-            grams,
-            w,
-        )
+        gram_field = w @ grams_T
+
         logits = betas_view * (gram_field + biases_view)
         new_w = torch.softmax(logits, dim=-1)
+    
         if dt:
-            w += dt*(new_w-w)
+            w = w + dt * (new_w - w)
         else:
             w = new_w
+        #gram_field = torch.einsum(
+        #    "pkh,bpjh->bpjk",
+        #    grams,
+        #    w,
+        #)
+        #logits = betas_view * (gram_field + biases_view)
+        #new_w = torch.softmax(logits, dim=-1)
+        #if dt:
+        #    w += dt*(new_w-w)
+        #else:
+        #    w = new_w
     if target_device is not None:
         w = w.to(target_device)
     return w
@@ -573,7 +831,6 @@ def deterministic_dynamics_annealing(
     else:
         return torch.stack(x_coll, dim=0)
 
-    
 def dual_deterministic_dynamics_annealing(
     grams: torch.Tensor,
     biases: torch.Tensor,
