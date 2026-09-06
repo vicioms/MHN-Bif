@@ -359,7 +359,6 @@ def get_dual_symmetric_stability_matrix(gram, w, return_proj=False):
 def prepare_initial_conditions(
     patterns: torch.Tensor,
     biases: torch.Tensor,
-    betas: Union[torch.Tensor, float],
     x0: torch.Tensor,
 ):
     patterns = torch.as_tensor(patterns)
@@ -367,7 +366,6 @@ def prepare_initial_conditions(
     dtype = patterns.dtype
     biases = torch.as_tensor(biases, dtype=dtype, device=device)
     x0 = torch.as_tensor(x0, dtype=dtype, device=device)
-    betas = torch.as_tensor(betas, dtype=dtype, device=device)
 
     # ------------------------------------------------------------
     # Patterns: (K, N) or (P, K, N)
@@ -434,26 +432,16 @@ def prepare_initial_conditions(
 
     N_ic = x0.shape[1]
 
-    # ------------------------------------------------------------
-    # Beta sweep: (B,)
-    # ------------------------------------------------------------
-    if betas.ndim == 0:
-        betas = betas.reshape(1)
-    elif betas.ndim != 1:
-        raise ValueError(
-            f"betas must be scalar or one-dimensional, got {betas.shape}"
-        )
 
     # Broadcast shared quantities over pattern batches
     biases = biases.expand(P, K)
     x0 = x0.expand(P, N_ic, N)
 
-    return patterns, biases, betas, x0
+    return patterns, biases, x0
 
 def prepare_initial_conditions_dual(
     grams: torch.Tensor,
     biases: torch.Tensor,
-    betas: Union[torch.Tensor, float],
     w0: torch.Tensor,
 ):
     grams = torch.as_tensor(grams)
@@ -462,7 +450,6 @@ def prepare_initial_conditions_dual(
 
     biases = torch.as_tensor(biases, dtype=dtype, device=device)
     w0 = torch.as_tensor(w0, dtype=dtype, device=device)
-    betas = torch.as_tensor(betas, dtype=dtype, device=device)
 
     # Grams: (K, K) or (P, K, K)
     if grams.ndim not in (2, 3):
@@ -529,18 +516,10 @@ def prepare_initial_conditions_dual(
 
     N_ic = w0.shape[1]
 
-    # Beta sweep: (B,)
-    if betas.ndim == 0:
-        betas = betas.reshape(1)
-    elif betas.ndim != 1:
-        raise ValueError(
-            f"betas must be scalar or one-dimensional, got {betas.shape}"
-        )
-
     biases = biases.expand(P, K)
     w0 = w0.expand(P, N_ic, K)
 
-    return grams, biases, betas, w0
+    return grams, biases, w0
     
 def deterministic_dynamics(
     patterns: torch.Tensor,
@@ -572,7 +551,11 @@ def deterministic_dynamics(
     if num_iterations < 1:
         raise ValueError("num_iterations must be at least 1")
 
-    patterns, biases, betas, x0 = prepare_initial_conditions(patterns, biases, betas, x0)
+    patterns, biases, x0 = prepare_initial_conditions(patterns, biases, x0)
+    if isinstance(betas, float):
+        betas = torch.tensor([betas], dtype=patterns.dtype, device=patterns.device)
+    else:
+        betas = torch.as_tensor(betas, dtype=patterns.dtype, device=patterns.device)
     P, K, N = patterns.shape
     N_ic = x0.shape[-2]
     B = betas.numel()
@@ -642,7 +625,11 @@ def dual_deterministic_dynamics(
     if num_iterations < 1:
         raise ValueError("num_iterations must be at least 1")
 
-    grams, biases, betas, w0 = prepare_initial_conditions_dual(grams, biases, betas, w0)
+    grams, biases, w0 = prepare_initial_conditions_dual(grams, biases, w0)
+    if isinstance(betas, float):
+        betas = torch.tensor([betas], dtype=grams.dtype, device=grams.device)
+    else:
+        betas = torch.as_tensor(betas, dtype=grams.dtype, device=grams.device)
     P,K,K = grams.shape
     B = betas.numel()
     N_ic = w0.shape[-2]
@@ -685,60 +672,55 @@ def dual_deterministic_dynamics(
         w = w.to(target_device)
     return w
 
-def deterministic_dynamics_cont_annealing(
-    patterns: torch.Tensor,
+
+        
+def dual_deterministic_dynamics_cont_annealing(
+    grams: torch.Tensor,
     biases: torch.Tensor,
-    x0: torch.Tensor,
+    w0: torch.Tensor,
     beta_start : float,
     beta_end : float,
     beta_logspace : bool,
-    dt : float,
-    num_iterations: int,
-    num_snapshots: int,
-    return_probs: bool = False,
+    num_betas: int,
+    num_iterations_per_beta : int,
     verbose: bool = False,
+    dt : Optional[float] = None
 ):
 
-    if num_iterations < 1:
-        raise ValueError("num_iterations must be at least 1.")
-    
-    if beta_logspace:
-        betas = torch.logspace(log(beta_start), log(beta_end), steps=num_iterations)
-    else:
-        betas = torch.linspace(beta_start, beta_end, steps=num_iterations)
-    patterns, biases, betas, x0 = prepare_initial_conditions(patterns, biases, betas, x0)
-    P, K, N = patterns.shape
-    N_ic = x0.shape[-2]
-    x = x0.expand(P, N_ic, N).clone()
 
-    x_coll = []
-    if return_probs:
-        probs_coll = []
+    if beta_logspace:
+        betas = torch.logspace(log(beta_start), log(beta_end), steps=num_betas)
+    else:
+        betas = torch.linspace(beta_start, beta_end, steps=num_betas)
+    betas = betas.to(grams.device)
+    grams, biases, w0 = prepare_initial_conditions_dual(grams, biases, w0)
+    P,K,K = grams.shape
+    B = betas.numel()
+    N_ic = w0.shape[-2]
+    w = w0.unsqueeze(0).expand(B+1, P, N_ic, K).clone()
+
+    biases_view = biases.reshape(P, 1, K)
 
     iterator = tqdm(
         enumerate(betas),
-        total=len(betas),
-        desc="Annealing",
+        desc="Computing dual fixed points",
         disable=not verbose,
     )
-    
-    biases_view = biases.view(P, 1, K)
-    
+
     for beta_idx, beta in iterator:
-        logits = torch.einsum("ski,sci->sck", patterns, x)
-        logits = beta * (logits + biases_view)
-        weights = torch.softmax(logits, dim=-1)
-        means = torch.einsum("sck,ski->sci", weights, patterns)
-        x += dt*(means - x)
-        if beta_idx % (num_iterations // num_snapshots) == 0:
-            x_coll.append(x.clone())
-            if return_probs:
-                probs_coll.append(weights.clone())
-    if return_probs:
-        return torch.stack(x_coll, dim=0), torch.stack(probs_coll, dim=0)
-    else:
-        return torch.stack(x_coll, dim=0)
-        
+        w[beta_idx+1] = w[beta_idx].clone()
+        for _ in range(num_iterations_per_beta):
+            gram_field = w[beta_idx+1] @ grams
+
+            logits = beta * (gram_field + biases_view)
+            new_w = torch.softmax(logits, dim=-1)
+
+            if dt:
+                w[beta_idx + 1] = w[beta_idx+1] + dt * (new_w - w[beta_idx+1])
+            else:
+                w[beta_idx + 1] = new_w
+    return w[1:], betas
+
 def deterministic_dynamics_annealing(
     patterns: torch.Tensor,
     biases: torch.Tensor,
@@ -750,33 +732,13 @@ def deterministic_dynamics_annealing(
     verbose: bool = False,
     dt : Optional[float] = None
 ):
-    """
-    Annealed deterministic dynamics.
-
-    At each beta, compute the deterministic fixed point
-
-        x = P^T softmax(beta * (P x + b))
-
-    Then, before moving to the next beta, perturb the logits by Gaussian noise:
-
-        logits -> logits + logit_noise_std * eta
-
-    and use the corresponding softmax barycenter as the next initial condition.
-
-    Shapes:
-        patterns: (K, N) or (N_p, K, N)
-        biases:   (K,) or (N_p, K)
-        betas:    scalar or (B,)
-        x0:       (N,) or (N_ic, N) or (N_p, N_ic, N)
-
-    Returns:
-        betas: (B,)
-        xs:    (B, N_p, N_ic, N)
-    """
-
     if num_iterations < 1:
         raise ValueError("num_iterations must be at least 1.")
-    patterns, biases, betas, x0 = prepare_initial_conditions(patterns, biases, betas, x0)
+    patterns, biases, x0 = prepare_initial_conditions(patterns, biases, x0)
+    if isinstance(betas, float):
+        betas = torch.tensor([betas], dtype=patterns.dtype, device=patterns.device)
+    else:
+        betas = torch.as_tensor(betas, dtype=patterns.dtype, device=patterns.device)
     P, K, N = patterns.shape
     N_ic = x0.shape[-2]
     x_ic = x0.expand(P, N_ic, N).clone()
@@ -841,32 +803,6 @@ def dual_deterministic_dynamics_annealing(
     verbose: bool = False,
     dt : Optional[float] = None
 ):
-    """
-    Annealed deterministic dynamics for the dual map.
-
-    At each beta, compute the deterministic fixed point
-
-        w = softmax(beta * (G w + b)).
-
-    Then, before moving to the next beta, perturb the converged logits by
-    Gaussian noise,
-
-        logits -> logits + logit_noise_std * eta,
-
-    and use the corresponding softmax weights as the next initial condition.
-
-    Shapes:
-        grams:  (K, K) or (N_G, K, K)
-        biases: (K,) or (N_G, K)
-        betas:  scalar or (B,)
-        w0:     (K,), (N_ic, K), or (N_G, N_ic, K)
-
-    Broadcasting:
-        Singleton Gram-batch axes are broadcast to the common batch size.
-
-    Returns:
-        ws: (B, N_G, N_ic, K)
-    """
     if num_iterations < 1:
         raise ValueError("num_iterations must be at least 1")
 
@@ -876,7 +812,11 @@ def dual_deterministic_dynamics_annealing(
     if num_iterations < 1:
         raise ValueError("num_iterations must be at least 1")
     
-    grams, biases, betas, w0 = prepare_initial_conditions_dual(grams, biases, betas, w0)
+    grams, biases, w0 = prepare_initial_conditions_dual(grams, biases, w0)
+    if isinstance(betas, float):
+        betas = torch.tensor([betas], dtype=grams.dtype, device=grams.device)
+    else:
+        betas = torch.as_tensor(betas, dtype=grams.dtype, device=grams.device)
     P,K,K = grams.shape
     B = betas.numel()
     N_ic = w0.shape[-2]
