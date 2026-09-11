@@ -356,6 +356,20 @@ def get_dual_symmetric_stability_matrix(gram, w, return_proj=False):
     else:
         return stab, fisher_sqrt
 
+def get_weighted_covariance(patterns, w):
+
+    weighted_mean = torch.einsum(
+        "...k,...kn->...n",
+        w, patterns
+    )
+
+    centered_patterns = patterns - weighted_mean[..., None, :]
+
+    return torch.einsum(
+        "...k,...kn,...km->...nm",
+        w, centered_patterns, centered_patterns
+    )
+
 def prepare_initial_conditions(
     patterns: torch.Tensor,
     biases: torch.Tensor,
@@ -604,6 +618,7 @@ def dual_deterministic_dynamics(
     verbose: bool = False,
     target_device = None,
     dt : Optional[float] = None,
+    natural_gradient: bool = False
 ):
     """
     Perform Picard iterations of the dual map
@@ -644,30 +659,16 @@ def dual_deterministic_dynamics(
         disable=not verbose,
     )
 
-    grams_T = grams.transpose(-1, -2).contiguous()
-
     for _ in iterator:
         # Explicitly compute (G w)_k = sum_h G_{k h} w_h.
-        gram_field = w @ grams_T
-
+        gram_field = w @ grams
         logits = betas_view * (gram_field + biases_view)
         new_w = torch.softmax(logits, dim=-1)
-    
         if dt:
             w = w + dt * (new_w - w)
         else:
             w = new_w
-        #gram_field = torch.einsum(
-        #    "pkh,bpjh->bpjk",
-        #    grams,
-        #    w,
-        #)
-        #logits = betas_view * (gram_field + biases_view)
-        #new_w = torch.softmax(logits, dim=-1)
-        #if dt:
-        #    w += dt*(new_w-w)
-        #else:
-        #    w = new_w
+        
     if target_device is not None:
         w = w.to(target_device)
     return w
@@ -848,11 +849,12 @@ def dual_deterministic_dynamics_annealing(
         # No need to construct the next initial condition after the final beta.
         if beta_idx < betas.numel() - 1:
             if logit_noise_std > 0:
-                gram_field = torch.einsum(
-                    "pkh,pjh->pjk",
-                    grams,
-                    w,
-                )
+                #gram_field = torch.einsum(
+                #    "pkh,pjh->pjk",
+                #    grams,
+                #    w,
+                #)
+                gram_field = w @ grams
                 logits = beta * (
                     gram_field + biases.reshape(P, 1, K)
                 )
