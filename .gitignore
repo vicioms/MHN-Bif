@@ -71,7 +71,8 @@ dmypy.json
 
 
 # Personalized
-datasets/*
-paper_results/local_data/
-paper_results/data/
-paper_results/experiments/
+paper/datasets/*
+paper/paper_results/local_data/
+paper/paper_results/data/
+paper/paper_results/experiments/
+paper/trained_models/

@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
+
 class SpatialMHN2d(nn.Module):
     """
     Spatial Modern Hopfield / neuron-field layer.
