@@ -1,6 +1,6 @@
 import torch
 from math import sqrt
-
+from tqdm.auto import tqdm
 class Dynamics:
     def __init__(self, patterns, biases, low_memory=False):
         super().__init__()
@@ -61,18 +61,27 @@ class Dynamics:
     def _converged(self, x_new : torch.Tensor, x : torch.Tensor, epsilon : float):
         return torch.all(torch.linalg.vector_norm(x_new - x, dim=-1) < epsilon)
 
-    def discrete_num_iters(self, x0 : torch.Tensor, betas : torch.Tensor, num_iters : int):
+    def discrete_num_iters(self, x0 : torch.Tensor, betas : torch.Tensor, num_iters : int, verbose : bool = False):
         x, betas = self._setup(x0, betas)
 
-        for _ in range(num_iters):
+        if verbose:
+            pbar = tqdm(range(num_iters), desc="Discrete Dynamics")
+        else:
+            pbar = range(num_iters)
+        for _ in pbar:
             x = self.get_update(x, betas)
 
         return x
 
-    def discrete(self, x0 : torch.Tensor, betas : torch.Tensor, epsilon : float, max_iters : int):
+    def discrete(self, x0 : torch.Tensor, betas : torch.Tensor, epsilon : float, max_iters : int, verbose : bool = False):
         x, betas = self._setup(x0, betas)
 
-        for _ in range(max_iters):
+        if verbose:
+            pbar = tqdm(range(max_iters), desc="Discrete Dynamics")
+        else:
+            pbar = range(max_iters)
+
+        for _ in pbar:
             x_new = self.get_update(x, betas)
             if self._converged(x_new, x, epsilon):
                 x = x_new
@@ -81,10 +90,15 @@ class Dynamics:
 
         return x
 
-    def continuous(self, x0 : torch.Tensor, betas : torch.Tensor, dt : float, epsilon : float, max_iters : int):
+    def continuous(self, x0 : torch.Tensor, betas : torch.Tensor, dt : float, epsilon : float, max_iters : int, verbose : bool = False):
         x, betas = self._setup(x0, betas)
 
-        for _ in range(max_iters):
+        if verbose:
+            pbar = tqdm(range(max_iters), desc="Continuous Dynamics")
+        else:
+            pbar = range(max_iters)
+
+        for _ in pbar:
             x_new = x + dt * (self.get_update(x, betas) - x)
             if self._converged(x_new, x, epsilon):
                 x = x_new
@@ -93,23 +107,33 @@ class Dynamics:
 
         return x
 
-    def continuous_num_iters(self, x0 : torch.Tensor, betas : torch.Tensor, dt : float, num_iters : int):
+    def continuous_num_iters(self, x0 : torch.Tensor, betas : torch.Tensor, dt : float, num_iters : int, verbose : bool = False):
         x, betas = self._setup(x0, betas)
 
-        for _ in range(num_iters):
+        if verbose:
+            pbar = tqdm(range(num_iters), desc="Continuous Dynamics")
+        else:
+            pbar = range(num_iters)
+
+        for _ in pbar:
             x = x + dt * (self.get_update(x, betas) - x)
 
         return x
 
-    def stochastic_single_temp_num_iters(self, x0 : torch.Tensor, betas : torch.Tensor, temp : float, dt : float, num_iters : int):
+    def stochastic_single_temp_num_iters(self, x0 : torch.Tensor, betas : torch.Tensor, temp : float, dt : float, num_iters : int, verbose : bool = False):
         x, betas = self._setup(x0, betas)
         noise_scale = sqrt(2 * dt * temp)
-        for _ in range(num_iters):
+        if verbose:
+            pbar = tqdm(range(num_iters), desc="Stochastic Dynamics")
+        else:
+            pbar = range(num_iters)
+
+        for _ in pbar:
             x = x + dt * (self.get_update(x, betas) - x) + noise_scale * torch.randn_like(x)
 
         return x
 
-    def stochastic_multiple_temp_num_iters(self, x0 : torch.Tensor, betas : torch.Tensor, temps : torch.Tensor, dt : float, num_iters : int):
+    def stochastic_multiple_temp_num_iters(self, x0 : torch.Tensor, betas : torch.Tensor, temps : torch.Tensor, dt : float, num_iters : int, verbose : bool = False):
         x, betas = self._setup(x0, betas)
         if temps.ndim != 1:
             raise ValueError("Temps must be a 1D tensor.")
@@ -117,7 +141,12 @@ class Dynamics:
             raise ValueError("Temps must have the same length as betas.")
         temps = temps[:, None, None]
         noise_scale = torch.sqrt(2 * dt * temps)
-        for _ in range(num_iters):
+        if verbose:
+            pbar = tqdm(range(num_iters), desc="Stochastic Dynamics")
+        else:
+            pbar = range(num_iters)
+
+        for _ in pbar:
             x = x + dt * (self.get_update(x, betas) - x) + noise_scale * torch.randn_like(x)
 
         return x
@@ -186,18 +215,28 @@ class DualDynamics:
     def _converged(self, p_new : torch.Tensor, p : torch.Tensor, epsilon : float):
         return torch.all(torch.linalg.vector_norm(p_new - p, dim=-1) < epsilon)
 
-    def discrete_num_iters(self, p0 : torch.Tensor, betas : torch.Tensor, num_iters : int):
+    def discrete_num_iters(self, p0 : torch.Tensor, betas : torch.Tensor, num_iters : int, verbose : bool = False):
         p, betas = self._setup(p0, betas)
 
-        for _ in range(num_iters):
+        if verbose:
+            pbar = tqdm(range(num_iters), desc="Discrete Dynamics")
+        else:
+            pbar = range(num_iters)
+
+        for _ in pbar:
             p = torch.softmax(betas * self.get_dual_logits(p), dim=-1)
 
         return p
 
-    def discrete(self, p0 : torch.Tensor, betas : torch.Tensor, epsilon : float, max_iters : int):
+    def discrete(self, p0 : torch.Tensor, betas : torch.Tensor, epsilon : float, max_iters : int, verbose : bool = False):
         p, betas = self._setup(p0, betas)
 
-        for _ in range(max_iters):
+        if verbose:
+            pbar = tqdm(range(max_iters), desc="Discrete Dynamics")
+        else:
+            pbar = range(max_iters)
+
+        for _ in pbar:
             p_new = torch.softmax(betas * self.get_dual_logits(p), dim=-1)
             if self._converged(p_new, p, epsilon):
                 p = p_new
@@ -206,10 +245,15 @@ class DualDynamics:
 
         return p
 
-    def continuous(self, p0 : torch.Tensor, betas : torch.Tensor, dt : float, epsilon : float, max_iters : int):
+    def continuous(self, p0 : torch.Tensor, betas : torch.Tensor, dt : float, epsilon : float, max_iters : int, verbose : bool = False):
         p, betas = self._setup(p0, betas)
 
-        for _ in range(max_iters):
+        if verbose:
+            pbar = tqdm(range(max_iters), desc="Continuous Dynamics")
+        else:
+            pbar = range(max_iters)
+
+        for _ in pbar:
             p_new = p + dt * (torch.softmax(betas * self.get_dual_logits(p), dim=-1) - p)
             if self._converged(p_new, p, epsilon):
                 p = p_new
@@ -218,19 +262,29 @@ class DualDynamics:
 
         return p
 
-    def continuous_num_iters(self, p0 : torch.Tensor, betas : torch.Tensor, dt : float, num_iters : int):
+    def continuous_num_iters(self, p0 : torch.Tensor, betas : torch.Tensor, dt : float, num_iters : int, verbose : bool = False):
         p, betas = self._setup(p0, betas)
 
-        for _ in range(num_iters):
+        if verbose:
+            pbar = tqdm(range(num_iters), desc="Continuous Dynamics")
+        else:
+            pbar = range(num_iters)
+
+        for _ in pbar:
             p = p + dt * (torch.softmax(betas * self.get_dual_logits(p), dim=-1) - p)
 
         return p
 
-    def natural_gradient_num_iters(self, p0 : torch.Tensor, betas : torch.Tensor, dt : float, num_iters : int):
+    def natural_gradient_num_iters(self, p0 : torch.Tensor, betas : torch.Tensor, dt : float, num_iters : int, verbose : bool = False):
 
         p, betas = self._setup(p0, betas)
     
-        for _ in range(num_iters):
+        if verbose:
+            pbar = tqdm(range(num_iters), desc="Natural Gradient Dynamics")
+        else:
+            pbar = range(num_iters)
+
+        for _ in pbar:
             term = self.get_dual_logits(p)
             term = term - (torch.log(p) + 1.0) / betas
             p = p * torch.exp(dt * term)
@@ -239,14 +293,19 @@ class DualDynamics:
         return p
 
     def natural_gradient_entmax(self, alpha: float, p0: torch.Tensor, betas: torch.Tensor,
-                            dt_base: float, total_time: float):
+                            dt_base: float, total_time: float, max_iters: int, verbose: bool = False):
         if not (1.0 < alpha <= 2.0):
             raise ValueError("alpha must satisfy 1 < alpha <= 2")
     
         p, betas = self._setup(p0, betas)
         t = torch.zeros_like(p[..., :1])
-    
-        while torch.any(t < total_time):
+        
+        if verbose:
+            pbar = tqdm(range(max_iters), desc="Natural Gradient Entmax Dynamics")
+        else:
+            pbar = range(max_iters)
+
+        for _ in pbar:
             s = p.pow(2.0 - alpha)
     
             term = self.get_dual_logits(p)
@@ -264,6 +323,9 @@ class DualDynamics:
     
             p = p + dt_eff * update
             t = t + dt_eff
+
+            if torch.all(t >= total_time):
+                break
     
         return p
 
