@@ -67,7 +67,7 @@ class Dynamics:
         if verbose:
             pbar = tqdm(range(num_iters), desc="Discrete Dynamics")
         else:
-            pbar = range(num_iters)
+            pbar = range(num_iters)  
         for _ in pbar:
             x = self.get_update(x, betas)
 
